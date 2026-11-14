@@ -72,7 +72,7 @@ const PLAN = [
  ["2026-12-11",5.4],["2026-12-13",5.4]
 ];
 const RACE = "2026-11-29";
-let state = {logs:{},extras:[]};
+let state = {logs:{},extras:[],payments:[]};
 
 // ₹200/km, but ₹500/km for any run of 5 km or more in one go
 const pay = km => km >= 5 ? km*500 : km*200;
@@ -123,6 +123,24 @@ function schedule(){
   return {targets, projected, reachable, short: Math.max(0, GOAL-projected), level};
 }
 
+function paidTotal(){ return (state.payments||[]).reduce((s,p)=>s+p.amt,0); }
+
+function moneyCard(t, today){
+  const got = paidTotal(), owed = Math.max(0, Math.round(t.money - got));
+  let h = `<h2>Money received</h2><div class="card">
+    <div class="stats"><div class="stat"><b>${rs(t.money)}</b><span>earned</span></div>
+    <div class="stat"><b style="color:var(--accent)">${rs(got)}</b><span>received</span></div>
+    <div class="stat"><b style="color:${owed>0?"var(--gold)":"var(--mute)"}">${rs(owed)}</b><span>still to get</span></div></div>
+    <div class="extra" style="margin-top:12px"><input type="date" id="payd" value="${today}">
+    ₹ <input type="number" step="1" min="1" id="paya" value="${owed>0?owed:""}" placeholder="amount" style="width:96px">
+    <button onclick="addPayment()">Got paid</button></div>`;
+  (state.payments||[]).slice().sort((a,b)=>a.d<b.d?1:-1).forEach(p=>{
+    h += `<div class="row"><div class="dot done">₹</div><div class="info"><div class="t">${rs(p.amt)} received</div><div class="d">${fmtDate(p.d)}</div></div>
+      <button class="ghost" onclick="delPayment('${p.id}')">✕</button></div>`;
+  });
+  return h + `</div>`;
+}
+
 function render(){
   const t = totals(), today = todayStr(), sc = schedule();
   const pct = Math.min(100, t.money/GOAL*100);
@@ -131,7 +149,7 @@ function render(){
   let h = `<h1>🏃 5K Run Tracker</h1><div class="sub">9 Nov – 13 Dec · every alternate day · goal ${rs(GOAL)}</div>`;
   h += `<div class="card"><div class="money">${rs(t.money)} <small>/ ${rs(GOAL)}</small></div>
     <div class="bar"><div style="width:${pct}%"></div></div>
-    <div class="note">${left>0 ? rs(left)+" to go" : "🎉 Goal reached!"}</div>
+    <div class="note">${left>0 ? rs(left)+" to go" : "🎉 Goal reached!"} · received so far ${rs(paidTotal())}</div>
     <div class="stats"><div class="stat"><b>${t.km.toFixed(1)}</b><span>km run</span></div>
     <div class="stat"><b>${t.runs}</b><span>runs done</span></div>
     <div class="stat"><b>${t.fives}</b><span>5 km+ runs</span></div></div>
@@ -166,6 +184,7 @@ function render(){
     h += `</div>`;
   });
   h += `</div>`;
+  h += moneyCard(t, today);
   h += `<h2>Extra runs</h2><div class="card"><div class="extra">
     <input type="date" id="exd" value="${today}"><input type="number" step="0.1" min="0" id="exk" placeholder="km">
     <button onclick="addExtra()">Add</button></div>`;
@@ -195,7 +214,7 @@ function exportData(){
 }
 function importData(input){
   const f=input.files[0]; if(!f) return;
-  f.text().then(t=>{ const s=JSON.parse(t); if(!s.logs||!s.extras) throw 0; state=s; save("Backup restored"); })
+  f.text().then(t=>{ const s=JSON.parse(t); if(!s.logs||!s.extras) throw 0; s.payments = s.payments||[]; state=s; save("Backup restored"); })
    .catch(()=>toast("That isn't a tracker backup file"));
   input.value="";
 }
@@ -228,9 +247,18 @@ function addExtra(){
   save(feedback(km));
 }
 function delExtra(id){ state.extras = state.extras.filter(e=>e.id!==id); save("Removed"); }
+function addPayment(){
+  const d=document.getElementById("payd").value, amt=Math.round(parseFloat(document.getElementById("paya").value));
+  if(!d || !(amt>0)) return toast("Pick a date and enter the amount you got");
+  state.payments.push({id:Date.now().toString(36), d, amt});
+  const owed = Math.round(totals().money - paidTotal());
+  save(owed > 0 ? `Got ${rs(amt)}. Still to get: ${rs(owed)}.` : owed < 0 ? `Got ${rs(amt)}. That's ${rs(-owed)} more than you've earned so far.` : `Got ${rs(amt)}. You're fully paid up! 🎉`);
+}
+function delPayment(id){ state.payments = state.payments.filter(p=>p.id!==id); save("Payment removed"); }
 
 try { const ls = localStorage.getItem("runTrackerState"); if(ls) state = JSON.parse(ls); } catch(e){}
 if(!state || !state.logs) state = {logs:{},extras:[]};
+if(!state.payments) state.payments = [];
 render();
 // re-render when reopened so "today" stays right
 document.addEventListener("visibilitychange",()=>{ if(!document.hidden) render(); });
