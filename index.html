@@ -51,6 +51,10 @@ h2{font-size:14px;color:var(--mute);margin:18px 2px 8px;text-transform:uppercase
 .toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#222733;border:1px solid var(--line);padding:8px 14px;border-radius:10px;font-size:13px;opacity:0;transition:opacity .3s;pointer-events:none}
 .toast.on{opacity:1}
 .extra{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.proj{margin-top:10px;font-size:13px;padding:8px 10px;border-radius:8px}
+.proj.good{background:#12291f;color:var(--accent)}
+.proj.bad{background:#3a2226;color:var(--warn)}
+.was{font-size:11px;color:var(--mute);font-weight:400;text-decoration:line-through;margin-left:4px}
 </style>
 </head>
 <body>
@@ -58,6 +62,8 @@ h2{font-size:14px;color:var(--mute);margin:18px 2px 8px;text-transform:uppercase
 <div class="toast" id="toast"></div>
 <script>
 const GOAL = 27500;
+const STEP = 0.3;      // build-up per run while under 5 km
+const MAX_KM = 6.0;    // never ask for more than this in one run
 const PLAN = [
  ["2026-11-09",2.0],["2026-11-11",2.3],["2026-11-13",2.6],["2026-11-15",2.9],
  ["2026-11-17",3.2],["2026-11-19",3.5],["2026-11-21",3.8],["2026-11-23",4.1],
@@ -65,54 +71,95 @@ const PLAN = [
  ["2026-12-03",5.0],["2026-12-05",5.2],["2026-12-07",5.2],["2026-12-09",5.4],
  ["2026-12-11",5.4],["2026-12-13",5.4]
 ];
+const RACE = "2026-11-29";
 let state = {logs:{},extras:[]};
 
 // ₹200/km, but ₹500/km for any run of 5 km or more in one go
 const pay = km => km >= 5 ? km*500 : km*200;
+const r1 = x => Math.round(x*10)/10;
+const ceil1 = x => Math.ceil(x*10 - 1e-9)/10;
 const rs = n => "₹" + Math.round(n).toLocaleString("en-IN");
 const fmtDate = s => new Date(s+"T00:00:00").toLocaleDateString("en-IN",{weekday:"short",day:"numeric",month:"short"});
 const todayStr = () => { const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
 
+function allRuns(){
+  return Object.entries(state.logs).map(([d,km])=>({d,km}))
+    .concat(state.extras.map(e=>({d:e.d,km:e.km})))
+    .filter(r=>r.km>0).sort((a,b)=>a.d<b.d?-1:a.d>b.d?1:0);
+}
 function totals(){
   let km=0, money=0, runs=0, fives=0;
-  const all = Object.values(state.logs).concat(state.extras.map(e=>e.km));
-  all.forEach(k=>{ if(k>0){ km+=k; money+=pay(k); runs++; if(k>=5) fives++; } });
+  allRuns().forEach(({km:k})=>{ km+=k; money+=pay(k); runs++; if(k>=5) fives++; });
   return {km,money,runs,fives};
 }
 
+// Re-plan every run still to come, starting from what you ACTUALLY ran last.
+// 1) Under 5 km: build up +0.3 km per run from your last real run.
+// 2) Race day is always 5 km.
+// 3) Once at 5 km+, every remaining run gets the same distance — just enough
+//    (min 5 km, max 6 km) to finish at ₹27,500 by 13 Dec.
+function schedule(){
+  const today = todayStr();
+  const runs = allRuns();
+  const earned = runs.reduce((s,r)=>s+pay(r.km),0);
+  let prev = runs.length ? runs[runs.length-1].km : r1(PLAN[0][1]-STEP);
+  const left = PLAN.filter(([d]) => d >= today && !(state.logs[d]>0)).map(([d]) => ({d}));
+  let rampMoney = 0, fixedMoney = 0, hold = [];
+  left.forEach(s=>{
+    if(s.d === RACE){ s.km = Math.max(5, prev >= 5 ? prev : 5); s.fixed = true; fixedMoney += pay(5); s.km = 5; prev = Math.max(prev,5); return; }
+    if(prev < 5){ s.km = r1(Math.min(5, prev + STEP)); prev = s.km; }
+    else { s.km = prev; }
+    if(s.km >= 5) hold.push(s); else rampMoney += pay(s.km);
+  });
+  const need = GOAL - earned - rampMoney - fixedMoney;
+  let level = 5, reachable = true;
+  if(hold.length){
+    level = Math.max(5, ceil1(need / (500*hold.length)));
+    if(level > MAX_KM){ level = MAX_KM; reachable = false; }
+    hold.forEach(s=>s.km = level);
+  } else if(need > 0) reachable = false;
+  const projected = earned + left.reduce((s,x)=>s+pay(x.km),0);
+  const targets = {}; left.forEach(s=>targets[s.d]=s.km);
+  return {targets, projected, reachable, short: Math.max(0, GOAL-projected), level};
+}
+
 function render(){
-  const t = totals(), today = todayStr();
+  const t = totals(), today = todayStr(), sc = schedule();
   const pct = Math.min(100, t.money/GOAL*100);
-  const nextIdx = PLAN.findIndex(([d]) => !(state.logs[d]>0) && d >= today);
   const left = Math.max(0, GOAL - t.money);
+  const nextIdx = PLAN.findIndex(([d]) => sc.targets[d] !== undefined);
   let h = `<h1>🏃 5K Run Tracker</h1><div class="sub">9 Nov – 13 Dec · every alternate day · goal ${rs(GOAL)}</div>`;
   h += `<div class="card"><div class="money">${rs(t.money)} <small>/ ${rs(GOAL)}</small></div>
     <div class="bar"><div style="width:${pct}%"></div></div>
     <div class="note">${left>0 ? rs(left)+" to go" : "🎉 Goal reached!"}</div>
     <div class="stats"><div class="stat"><b>${t.km.toFixed(1)}</b><span>km run</span></div>
     <div class="stat"><b>${t.runs}</b><span>runs done</span></div>
-    <div class="stat"><b>${t.fives}</b><span>5 km+ runs</span></div></div></div>`;
+    <div class="stat"><b>${t.fives}</b><span>5 km+ runs</span></div></div>
+    <div class="proj ${sc.short>0?"bad":"good"}">${sc.short>0
+      ? `⚠️ Even at ${MAX_KM} km per run you'd reach ${rs(sc.projected)} — ${rs(sc.short)} short. Add an extra 5 km+ run (worth ${rs(2500)}+) to catch up.`
+      : `✅ On track: following the plan below gets you ${rs(sc.projected)} by 13 Dec.`}</div></div>`;
   if(nextIdx>=0){
-    const [d,km,tag] = PLAN[nextIdx];
+    const [d,orig,tag] = PLAN[nextIdx], km = sc.targets[d];
     const isToday = d===today;
     h += `<div class="card next"><div class="lbl">${isToday?"Today's run":"Next run"}</div>
-      <div class="big">${km.toFixed(1)} km ${tag?`<span class="tag">${tag}</span>`:""}</div>
+      <div class="big">${km.toFixed(1)} km ${tag?`<span class="tag">${tag}</span>`:""}${km!==orig?` <span class="was">was ${orig.toFixed(1)}</span>`:""}</div>
       <div class="d" style="color:var(--mute);font-size:13px">${fmtDate(d)} · 6 PM · earns ${rs(pay(km))}${km>=5?" (₹500/km)":""}</div>
       ${isToday?`<div style="display:flex;gap:8px;margin-top:10px;align-items:center"><input type="number" step="0.1" min="0" id="quick" value="${km}"> km <button onclick="logRun('${d}',document.getElementById('quick').value)">Log run</button></div>`:""}
     </div>`;
   }
   h += `<h2>Plan</h2><div class="card">`;
-  PLAN.forEach(([d,km,tag],i)=>{
+  PLAN.forEach(([d,orig,tag],i)=>{
     const done = state.logs[d]>0, actual = state.logs[d];
     const past = d < today, isToday = d===today;
+    const km = sc.targets[d];
     const cls = done?"done":(past?"missed":"");
     h += `<div class="row"><div class="dot ${cls} ${isToday?"today":""}">${done?"✓":(i+1)}</div>
-      <div class="info"><div class="t">${done?actual.toFixed(1)+" km":"Target "+km.toFixed(1)+" km"}${tag?`<span class="tag">${tag}</span>`:""}</div>
-      <div class="d">${fmtDate(d)}${done && actual<km?` · target ${km.toFixed(1)}`:""}${!done&&past?" · missed":""}</div></div>`;
+      <div class="info"><div class="t">${done?actual.toFixed(1)+" km":(km!==undefined?"Target "+km.toFixed(1)+" km":"Target "+orig.toFixed(1)+" km")}${tag?`<span class="tag">${tag}</span>`:""}${!done&&km!==undefined&&km!==orig?` <span class="was">was ${orig.toFixed(1)}</span>`:""}</div>
+      <div class="d">${fmtDate(d)}${!done&&past?" · missed":""}</div></div>`;
     if(done){
       h += `<div class="earn ${actual>=5?"five":""}">+${rs(pay(actual))}</div><button class="ghost" onclick="logRun('${d}',0)">Undo</button>`;
     } else if(d <= today){
-      h += `<input type="number" step="0.1" min="0" id="in-${d}" value="${km}"><button onclick="logRun('${d}',document.getElementById('in-${d}').value)">Done</button>`;
+      h += `<input type="number" step="0.1" min="0" id="in-${d}" value="${km!==undefined?km:orig}"><button onclick="logRun('${d}',document.getElementById('in-${d}').value)">Done</button>`;
     } else {
       h += `<div class="earn ${km>=5?"five":""}">${rs(pay(km))}</div>`;
     }
@@ -127,13 +174,13 @@ function render(){
       <div class="earn ${e.km>=5?"five":""}">+${rs(pay(e.km))}</div><button class="ghost" onclick="delExtra('${e.id}')">✕</button></div>`;
   });
   h += `</div><div class="note">Pay rule: ₹200 per km. A run of 5 km or more in one go pays ₹500 per km for the whole run.
-    Saved on this device.</div>
+    Ran less or more than the target? Just log what you actually ran — the rest of the plan adjusts itself. Saved on this device.</div>
   <div class="extra" style="margin-top:10px"><button class="ghost" onclick="exportData()">⬇ Backup</button>
   <label class="ghost" style="border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--mute);font-size:14px;cursor:pointer">⬆ Restore<input type="file" accept=".json,application/json" style="display:none" onchange="importData(this)"></label></div>`;
   document.getElementById("app").innerHTML = h;
 }
 
-function toast(msg){ const el=document.getElementById("toast"); el.textContent=msg; el.classList.add("on"); clearTimeout(toast._t); toast._t=setTimeout(()=>el.classList.remove("on"),1800); }
+function toast(msg){ const el=document.getElementById("toast"); el.textContent=msg; el.classList.add("on"); clearTimeout(toast._t); toast._t=setTimeout(()=>el.classList.remove("on"),3200); }
 
 function save(msg){
   try { localStorage.setItem("runTrackerState", JSON.stringify(state)); } catch(e){ toast("Couldn't save on this device"); }
@@ -153,25 +200,39 @@ function importData(input){
   input.value="";
 }
 
+// Message after logging: how you did vs the target, and what changes next
+function feedback(km, target){
+  let m = `Logged ${km.toFixed(1)} km · +${rs(pay(km))}.`;
+  if(km < 5 && km >= 4.5) m += ` Only ${(5-km).toFixed(1)} km short of 5 km — that would have paid ${rs(2500)}.`;
+  if(target !== undefined){
+    const diff = r1(km - target);
+    if(diff < 0) m += ` ${Math.abs(diff).toFixed(1)} km under target — next runs adjusted.`;
+    else if(diff > 0) m += ` ${diff.toFixed(1)} km over target — next runs adjusted.`;
+  }
+  const sc = schedule();
+  m += sc.short > 0 ? ` Projected ${rs(sc.projected)} — add an extra run.` : ` Still on track for ${rs(GOAL)}.`;
+  return m;
+}
 function logRun(d, val){
-  const km = Math.round(parseFloat(val)*10)/10;
+  const km = r1(parseFloat(val));
   if(!(km>=0)) return toast("Enter the km you ran");
   if(km===0){ delete state.logs[d]; save("Run removed"); return; }
+  const target = schedule().targets[d];
   state.logs[d] = km;
-  save(`Logged ${km.toFixed(1)} km · +${rs(pay(km))}`);
+  save(feedback(km, target));
 }
 function addExtra(){
-  const d=document.getElementById("exd").value, km=Math.round(parseFloat(document.getElementById("exk").value)*10)/10;
+  const d=document.getElementById("exd").value, km=r1(parseFloat(document.getElementById("exk").value));
   if(!d || !(km>0)) return toast("Pick a date and enter km");
   state.extras.push({id:Date.now().toString(36), d, km});
-  save(`Extra ${km.toFixed(1)} km · +${rs(pay(km))}`);
+  save(feedback(km));
 }
 function delExtra(id){ state.extras = state.extras.filter(e=>e.id!==id); save("Removed"); }
 
 try { const ls = localStorage.getItem("runTrackerState"); if(ls) state = JSON.parse(ls); } catch(e){}
 if(!state || !state.logs) state = {logs:{},extras:[]};
 render();
-// re-render at midnight / when reopened so "today" stays right
+// re-render when reopened so "today" stays right
 document.addEventListener("visibilitychange",()=>{ if(!document.hidden) render(); });
 if("serviceWorker" in navigator){ window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{})); }
 </script>
