@@ -1,5 +1,5 @@
 // Offline support: cache the app files, serve from cache, refresh in background
-const CACHE = "run-tracker-v1";
+const CACHE = "run-tracker-v2";
 const FILES = ["./", "index.html", "manifest.json", "icon.svg"];
 
 self.addEventListener("install", e => {
